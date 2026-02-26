@@ -180,7 +180,7 @@ readonly class FluxContentTypeProvider implements ContentTypeProviderInterface
         return ArrayUtility::removeEmptyValuesFromArray($normalizedGrid);
     }
 
-    public function getTemplate(string $contentType): ?string
+    public function getFrontendTemplate(string $contentType): ?string
     {
         $provider = null;
         foreach (Core::getRegisteredFlexFormProviders() as $registeredProvider) {
@@ -201,6 +201,32 @@ readonly class FluxContentTypeProvider implements ContentTypeProviderInterface
             // Remove multiple \r\n or \n\n with a single \n
             $templateCode = preg_replace('/(\r\n|\n){3,}/', "\n\n", $templateCode);
             return $templateCode;
+        }
+
+        return null;
+    }
+
+    public function getBackendPreviewTemplate(string $contentType): ?string
+    {
+        $provider = null;
+        foreach (Core::getRegisteredFlexFormProviders() as $registeredProvider) {
+            if ($registeredProvider instanceof ProviderInterface && $registeredProvider->getContentObjectType() === $contentType) {
+                $provider = $registeredProvider;
+                break;
+            }
+        }
+
+        $templateFile = $provider->getTemplatePathAndFilename([]);
+        if ($templateFile && file_exists($templateFile)) {
+            $templateCode = file_get_contents($templateFile);
+            // Find the content of <f:section name="Preview">...</f:section> and return it as the backend preview template
+            preg_match('/<f:section name="Preview">(.*?)<\/f:section>/s', $templateCode, $matches);
+            if (isset($matches[1])) {
+                $previewTemplate = $matches[1];
+                // Remove multiple \r\n or \n\n with a single \n
+                $previewTemplate = preg_replace('/(\r\n|\n){3,}/', "\n\n", $previewTemplate);
+                return $previewTemplate;
+            }
         }
 
         return null;
