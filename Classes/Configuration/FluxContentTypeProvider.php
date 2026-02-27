@@ -19,7 +19,7 @@ use TYPO3\CMS\Core\Http\ServerRequestFactory;
 use TYPO3\CMS\Core\Imaging\IconRegistry;
 use TYPO3\CMS\Core\Localization\LanguageService;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
-use WEBcoast\Migrator\Configuration\ContentTypeProviderInterface;
+use WEBcoast\Migrator\Provider\ContentTypeProviderInterface;
 use WEBcoast\Migrator\Exception\UnsupportedContentTypeException;
 use WEBcoast\Migrator\Migration\FieldType;
 use WEBcoast\Migrator\Utility\ArrayUtility;
