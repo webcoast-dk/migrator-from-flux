@@ -359,21 +359,22 @@ class FluxContentTypeProvider implements ContentTypeProviderInterface, LoggerAwa
         } elseif ($field->getType() === FieldType::FILE) {
             $data[$field->getIdentifier()] = [];
 
-            /** @var RelationHandler $relationHandler */
-            $relationHandler = GeneralUtility::makeInstance(RelationHandler::class);
-            $relationHandler->initializeForField('tt_content', array_replace_recursive($fieldConfiguration, ['foreign_match_fields' => ['fieldname' => 'settings.' . str_replace('{$variable}', $field->getIdentifier(), $fieldConfiguration['foreign_match_fields']['fieldname'])]]), $record['uid']);
-            if (!empty($relationHandler->tableArray['sys_file_reference'])) {
-                $relationHandler->processDeletePlaceholder();
-                $referenceUids = $relationHandler->tableArray['sys_file_reference'];
-
-                /** @var ResourceFactory $resourceFactory */
-                $resourceFactory = GeneralUtility::makeInstance(ResourceFactory::class);
-                foreach ($referenceUids as $referenceUid) {
-                    $data[$field->getIdentifier()][] = $resourceFactory->getFileReferenceObject($referenceUid);
-                }
+            if (empty($fieldConfiguration['type'])) {
+                // Fallback to "file" type. The FieldType::FILE would either be "file" or "inline". "inline" would be set as type in the field configuration
+                $fieldConfiguration['type'] = 'file';
+                $fieldConfiguration['foreign_table'] = 'sys_file_reference';
+                $fieldConfiguration['foreign_field'] = 'uid_foreign';
+                $fieldConfiguration['foreign_sortby'] = 'sorting_foreign';
+                $fieldConfiguration['foreign_table_field'] = 'tablenames';
+                $fieldConfiguration['foreign_match_fields'] = [
+                    'tablenames' => 'tt_content',
+                    'fieldname' => $field->getIdentifier(),
+                ];
             }
 
-            $relationHandler->initializeForField('tt_content', array_replace_recursive($fieldConfiguration, ['foreign_match_fields' => ['fieldname' => str_replace('{$variable}', $field->getIdentifier(), $fieldConfiguration['foreign_match_fields']['fieldname'])]]), $record['uid']);
+            /** @var RelationHandler $relationHandler */
+            $relationHandler = GeneralUtility::makeInstance(RelationHandler::class);
+            $relationHandler->initializeForField('tt_content', $fieldConfiguration, $record['uid']);
             if (!empty($relationHandler->tableArray['sys_file_reference'])) {
                 $relationHandler->processDeletePlaceholder();
                 $referenceUids = $relationHandler->tableArray['sys_file_reference'];
