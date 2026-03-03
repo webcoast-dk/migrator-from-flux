@@ -279,6 +279,136 @@ class FluxContentTypeProvider implements ContentTypeProviderInterface, LoggerAwa
         return GeneralUtility::getFileAbsFileName($source);
     }
 
+    public function getRecordData(array $rawRecord): array
+    {
+        $rawFlexFormData = $this->flexFormService->convertFlexFormContentToArray($rawRecord['pi_flexform'] ?? '') ?? [];
+        $data = [];
+        $fields = $this->getConfiguration($rawRecord['CType'])->getFields() ?? [];
+
+        foreach ($fields as $field) {
+            if ($field->getType() === FieldType::TAB) {
+                // Skip tab fields, as they hold no data
+                continue;
+            }
+
+            $this->addData($data, $rawFlexFormData, $rawRecord, $field);
+        }
+
+        return $data;
+    }
+
+    public function addData(array &$data, array $rawFlexFormData, array $record, Field $field): void
+    {
+
+        if ($field instanceof Section) {
+            $this->addDataForSection($data, $rawFlexFormData, $record, $field);
+        } else {
+            $this->addDataForField($data, $rawFlexFormData, $record, $field);
+        }
+    }
+
+    protected function addDataForField(array &$data, array $rawFlexFormData, array $record, Field $field): void
+    {
+        $fieldConfiguration = $field->getConfiguration() ?? [];
+        if ($field->getType() === FieldType::LEGACY_FILE) {
+            $fileNames = GeneralUtility::trimExplode(',', $rawFlexFormData[$field->getIdentifier()] ?? '', true);
+            if (empty($fileNames)) {
+                $data[$field->getIdentifier()] = [];
+                return;
+            }
+
+            $data[$field->getIdentifier()] = [];
+            // Check if filenames are actually integer file ids, if so, fetch the file objects via the file repository
+            if (MathUtility::canBeInterpretedAsInteger($fileNames[0])) {
+                foreach ($fileNames as $fileId) {
+                    $fileRepository = GeneralUtility::makeInstance(FileRepository::class);
+                    $file = $fileRepository->findByUid((int) $fileId);
+
+                    $data[$field->getIdentifier()][] = $file;
+                }
+            } else {
+                // Otherwise, assume they are file names and try to fetch the file objects via the storage repository
+                /** @var StorageRepository $storageRepository */
+                $storageRepository = GeneralUtility::makeInstance(StorageRepository::class);
+                foreach ($fileNames as $fileName) {
+                    $fileIdentifier = ltrim(($fieldConfiguration['uploadFolder'] ?? '') . '/' . $fileName, '/');
+                    $storage = $storageRepository->getStorageObject(0, [], $fileIdentifier);
+
+                    try {
+                        $file = $storage->getFile($fileIdentifier);
+                        if ($storage->getUid() === 0) {
+                            $defaultStorage = $storageRepository->getDefaultStorage();
+                            if (!$defaultStorage->hasFolder(dirname($fileIdentifier))) {
+                                $defaultStorage->createFolder(dirname($fileIdentifier));
+                            }
+                            $targetFolder = $defaultStorage->getFolder(dirname($fileIdentifier));
+                            if (!$targetFolder->hasFile($fileName)) {
+                                $newFile = $file->copyTo($targetFolder);
+                            } elseif ($targetFolder->getFile($fileName)->getSha1() === $file->getSha1()) {
+                                $newFile = $targetFolder->getFile($fileName);
+                            } else {
+                                $newFile = $file->copyTo($targetFolder);
+                            }
+                        }
+                        $data[$field->getIdentifier()][] = $newFile ?? $file;
+                    } catch (\Exception $e) {
+                        $this->logger->error($e->getMessage());
+                    }
+                }
+            }
+        } elseif ($field->getType() === FieldType::FILE) {
+            $data[$field->getIdentifier()] = [];
+
+            /** @var RelationHandler $relationHandler */
+            $relationHandler = GeneralUtility::makeInstance(RelationHandler::class);
+            $relationHandler->initializeForField('tt_content', array_replace_recursive($fieldConfiguration, ['foreign_match_fields' => ['fieldname' => 'settings.' . str_replace('{$variable}', $field->getIdentifier(), $fieldConfiguration['foreign_match_fields']['fieldname'])]]), $record['uid']);
+            if (!empty($relationHandler->tableArray['sys_file_reference'])) {
+                $relationHandler->processDeletePlaceholder();
+                $referenceUids = $relationHandler->tableArray['sys_file_reference'];
+
+                /** @var ResourceFactory $resourceFactory */
+                $resourceFactory = GeneralUtility::makeInstance(ResourceFactory::class);
+                foreach ($referenceUids as $referenceUid) {
+                    $data[$field->getIdentifier()][] = $resourceFactory->getFileReferenceObject($referenceUid);
+                }
+            }
+
+            $relationHandler->initializeForField('tt_content', array_replace_recursive($fieldConfiguration, ['foreign_match_fields' => ['fieldname' => str_replace('{$variable}', $field->getIdentifier(), $fieldConfiguration['foreign_match_fields']['fieldname'])]]), $record['uid']);
+            if (!empty($relationHandler->tableArray['sys_file_reference'])) {
+                $relationHandler->processDeletePlaceholder();
+                $referenceUids = $relationHandler->tableArray['sys_file_reference'];
+
+                /** @var ResourceFactory $resourceFactory */
+                $resourceFactory = GeneralUtility::makeInstance(ResourceFactory::class);
+                foreach ($referenceUids as $referenceUid) {
+                    $data[$field->getIdentifier()][] = $resourceFactory->getFileReferenceObject($referenceUid);
+                }
+            }
+        } else {
+            $data[$field->getIdentifier()] = $rawFlexFormData[$field->getIdentifier()] ?? '';
+        }
+    }
+
+    protected function addDataForSection(array &$data, array $rawFlexFormData, array $record, Section $field): void
+    {
+        $sections = $rawFlexFormData[$field->getIdentifier()] ?? [] ?: [];
+        $data[$field->getIdentifier()] = [];
+
+        foreach ($sections as $section) {
+            $childData = [];
+            $childFlexFormData = $section[$field->getObjectIdentifier()] ?? [];
+            foreach ($field as $childField) {
+                if ($childField->getType() === FieldType::TAB) {
+                    // Skip tab fields, as they hold no data
+                    continue;
+                }
+                $this->addData($childData, $childFlexFormData, $record, $childField);
+            }
+
+            $data[$field->getIdentifier()][] = $childData;
+        }
+    }
+
     protected function getLanguageService(): LanguageService
     {
         return $GLOBALS['LANG'];
