@@ -9,28 +9,44 @@ use FluidTYPO3\Flux\Core;
 use FluidTYPO3\Flux\Enum\FormOption;
 use FluidTYPO3\Flux\Form\Container\Column;
 use FluidTYPO3\Flux\Form\Container\Row;
-use FluidTYPO3\Flux\Form\Container\Section;
+use FluidTYPO3\Flux\Form\Container\Section as FluxSection;
 use FluidTYPO3\Flux\Form\Container\Sheet;
 use FluidTYPO3\Flux\Form\FieldInterface;
 use FluidTYPO3\Flux\Provider\ProviderInterface;
+use Psr\Log\LoggerAwareInterface;
+use Psr\Log\LoggerAwareTrait;
 use Symfony\Component\DependencyInjection\Attribute\AutowireIterator;
 use TYPO3\CMS\Core\Core\SystemEnvironmentBuilder;
+use TYPO3\CMS\Core\Database\RelationHandler;
 use TYPO3\CMS\Core\Http\ServerRequestFactory;
 use TYPO3\CMS\Core\Imaging\IconRegistry;
 use TYPO3\CMS\Core\Localization\LanguageService;
+use TYPO3\CMS\Core\Resource\FileRepository;
+use TYPO3\CMS\Core\Resource\ResourceFactory;
+use TYPO3\CMS\Core\Resource\StorageRepository;
+use TYPO3\CMS\Core\Service\FlexFormService;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
-use WEBcoast\Migrator\Provider\ContentTypeProviderInterface;
+use TYPO3\CMS\Core\Utility\MathUtility;
 use WEBcoast\Migrator\Exception\UnsupportedContentTypeException;
+use WEBcoast\Migrator\Migration\ContentType;
+use WEBcoast\Migrator\Migration\Field;
+use WEBcoast\Migrator\Migration\FieldCollection;
 use WEBcoast\Migrator\Migration\FieldType;
-use WEBcoast\Migrator\Utility\ArrayUtility;
+use WEBcoast\Migrator\Migration\Grid;
+use WEBcoast\Migrator\Migration\Section;
+use WEBcoast\Migrator\Migration\Tab;
+use WEBcoast\Migrator\Provider\ContentTypeProviderInterface;
+use WEBcoast\MigratorFromFlux\Configuration\Field\FieldConfigurationNormalizerInterface;
 
-readonly class FluxContentTypeProvider implements ContentTypeProviderInterface
+class FluxContentTypeProvider implements ContentTypeProviderInterface, LoggerAwareInterface
 {
+    use LoggerAwareTrait;
+
     /**
      * @param ContentTypeManager $contentTypeManager
-     * @param iterable|\WEBcoast\MigratorFromFlux\Configuration\Field\FieldConfigurationNormalizerInterface[] $fieldConfigurationNormalizers
+     * @param iterable|FieldConfigurationNormalizerInterface[] $fieldConfigurationNormalizers
      */
-    public function __construct(protected ContentTypeManager $contentTypeManager, #[AutowireIterator(tag: 'webcoast.migrator_from_flux.field_configuration_normalizer')] protected iterable $fieldConfigurationNormalizers, protected IconRegistry $iconRegistry)
+    public function __construct(readonly protected ContentTypeManager $contentTypeManager, #[AutowireIterator(tag: 'webcoast.migrator_from_flux.field_configuration_normalizer')] readonly protected iterable $fieldConfigurationNormalizers, readonly protected IconRegistry $iconRegistry, readonly protected FlexFormService $flexFormService)
     {
     }
 
@@ -70,7 +86,7 @@ readonly class FluxContentTypeProvider implements ContentTypeProviderInterface
         return $contentTypes;
     }
 
-    public function getConfiguration(string $contentType): array
+    public function getConfiguration(string $contentType): ContentType
     {
         $provider = null;
         foreach (Core::getRegisteredFlexFormProviders() as $registeredProvider) {
@@ -87,97 +103,103 @@ readonly class FluxContentTypeProvider implements ContentTypeProviderInterface
         $form = $provider->getForm([]);
         $grid = $provider->getGrid([]);
 
-        $configuration = [
-            'title' => $this->getLanguageService()->sL($form->getLabel()),
-            'description' => $this->getLanguageService()->sL($form->getDescription()),
-            'iconIdentifier' => $form->getOption(FormOption::ICON),
-            'group' => $form->getOption(FormOption::GROUP),
-            'fields' => $this->getNormalizedFieldConfiguration($form->getChildren()),
-            'grid' => $this->getNormalizedGridConfiguration($grid->getChildren()),
-        ];
-
-        return $configuration;
+        return new ContentType(
+            $provider->getContentObjectType(),
+            $form->getLabel(),
+            $form->getDescription(),
+            $this->getNormalizedFieldConfiguration($form->getChildren()),
+            $this->getNormalizedGridConfiguration($grid->getChildren()),
+            $form->getOption(FormOption::ICON),
+            $form->getOption(FormOption::GROUP)
+        );
     }
 
-    protected function getNormalizedFieldConfiguration(\SplObjectStorage $fields): array
+    protected function getNormalizedFieldConfiguration(\SplObjectStorage $fields): FieldCollection
     {
-        $normalizedFields = [];
+        $normalizedFields = new FieldCollection();
         foreach ($fields as $field) {
             /** @var $field FieldInterface */
             if ($field instanceof Sheet) {
-                $normalizedFields[] = [
-                    'identifier' => $field->getName(),
-                    'type' => FieldType::TAB,
-                    'title' => $this->getLanguageService()->sL($field->getLabel()),
-                ];
-                $normalizedFields = array_merge($normalizedFields, $this->getNormalizedFieldConfiguration($field->getChildren()));
-            } else {
+                $normalizedFields->addField(
+                    new Tab(
+                        $field->getName(),
+                        $field->getLabel(),
+                    )
+                );
 
-                if ($field instanceof Section) {
+                foreach ($this->getNormalizedFieldConfiguration($field->getChildren()) as $childField) {
+                    $normalizedFields->addField($childField);
+                }
+            } else {
+                if ($field instanceof FluxSection) {
                     if (count($field->getChildren()) > 1) {
                         // Currently, we only support sections with one child for migration, as this is the most common use case. Supporting multiple children would require a more complex mapping to TCA types, which is not implemented yet.
                         throw new UnsupportedContentTypeException(sprintf('Section "%s" has more than one child, which is currently not supported for migration.', $field->getName()), 1770727355);
                     }
                     // Rewind after counting to ensure we can access the first child
                     $field->getChildren()->rewind();
-                    $normalizedField = [
-                        'identifier' => $field->getName(),
-                        'label' => $this->getLanguageService()->sL($field->getLabel()),
-                        'description' => $this->getLanguageService()->sL($field->getDescription()) ?: null, // null if empty for auto-removal
-                        'type' => FieldType::SECTION,
-                        'fields' => $this->getNormalizedFieldConfiguration($field->getChildren()->current()->getChildren()),
-                    ];
+
+                    $normalizedFields->addField(
+                        new Section(
+                            $field->getName(),
+                            $field->getChildren()->current()->getName(),
+                            $field->getLabel(),
+                            $field->getDescription(),
+                            $this->getNormalizedFieldConfiguration($field->getChildren()->current()->getChildren()),
+                        )
+                    );
                 } else {
-                    $normalizedField = [
-                        'identifier' => $field->getName(),
-                        'label' => $this->getLanguageService()->sL($field->getLabel()),
-                        'description' => $this->getLanguageService()->sL($field->getDescription()) ?: null, // null if empty for auto-removal
-                        'exclude' => $field->getExclude() ?: null, // null if false for auto-removal
-                        'displayCondition' => $field->getDisplayCondition() ?: null, // null if empty for auto-removal
-                    ];
+                    $normalizedField = new Field(
+                        $field->getName(),
+                        null,
+                        $field->getLabel(),
+                        $field->getDescription() ?: null, // null if empty for auto-removal
+                        $field->getExclude(),
+                        $field->getDisplayCondition() ?: null, // null if empty for auto-removal
+                    );
                     $config = array_replace_recursive($field->buildConfiguration(), $field->getConfig());
                     foreach ($this->fieldConfigurationNormalizers as $normalizer) {
                         if ($normalizer->supports($field, $config)) {
-                            $normalizedField = $normalizer->normalize($field, $normalizedField, $config);
+                            $normalizer->normalize($field, $normalizedField, $config);
                         }
                     }
+
+                    if (!($normalizedField->getType() ?? null)) {
+                        // Do not include fields that do not have a type after normalization
+                        continue;
+                    }
+
+                    $normalizedFields->addField($normalizedField);
                 }
-
-                $normalizedField = ArrayUtility::removeEmptyValuesFromArray($normalizedField);
-
-                if (!($normalizedField['type'] ?? null)) {
-                    // Do not include fields that do not have a type after normalization
-                    continue;
-                }
-
-                $normalizedFields[] = $normalizedField;
             }
         }
 
         return $normalizedFields;
     }
 
-    protected function getNormalizedGridConfiguration(\SplObjectStorage $rows): array
+    protected function getNormalizedGridConfiguration(\SplObjectStorage $rows): Grid
     {
-        $normalizedGrid = [];
+        $normalizedGrid = new Grid();
         foreach ($rows as $row) {
             if ($row instanceof Row) {
-                $normalizedRow = [];
+                $normalizedRow = new \WEBcoast\Migrator\Migration\Row();
                 foreach ($row->getChildren() as $column) {
                     if ($column instanceof Column) {
-                        $normalizedRow[] = [
-                            'name' => $column->getLabel(),
-                            'colPos' => $column->getColumnPosition(),
-                            'colspan' => $column->getColspan() < 2 ? null : $column->getColspan(),
-                            'rowspan' => $column->getRowspan() < 2 ? null : $column->getRowspan(),
-                        ];
+                        $normalizedRow->attach(
+                            new \WEBcoast\Migrator\Migration\Column(
+                                $column->getLabel(),
+                                $column->getColumnPosition(),
+                                $column->getColspan(),
+                                $column->getRowspan()
+                            )
+                        );
                     }
                 }
                 $normalizedGrid[] = $normalizedRow;
             }
         }
 
-        return ArrayUtility::removeEmptyValuesFromArray($normalizedGrid);
+        return $normalizedGrid;
     }
 
     public function getFrontendTemplate(string $contentType): ?string
@@ -200,6 +222,7 @@ readonly class FluxContentTypeProvider implements ContentTypeProviderInterface
             $templateCode = preg_replace('/<f:layout name="Content"(.*?)>/', '<f:layout name="Flux"$1>', $templateCode);
             // Remove multiple \r\n or \n\n with a single \n
             $templateCode = preg_replace('/(\r\n|\n){3,}/', "\n\n", $templateCode);
+
             return $templateCode;
         }
 
@@ -225,6 +248,7 @@ readonly class FluxContentTypeProvider implements ContentTypeProviderInterface
                 $previewTemplate = $matches[1];
                 // Remove multiple \r\n or \n\n with a single \n
                 $previewTemplate = preg_replace('/(\r\n|\n){3,}/', "\n\n", $previewTemplate);
+
                 return $previewTemplate;
             }
         }

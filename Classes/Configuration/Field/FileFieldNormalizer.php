@@ -7,15 +7,16 @@ namespace WEBcoast\MigratorFromFlux\Configuration\Field;
 use FluidTYPO3\Flux\Form\Field\Inline;
 use FluidTYPO3\Flux\Form\Field\Inline\Fal;
 use FluidTYPO3\Flux\Form\FieldInterface;
+use WEBcoast\Migrator\Migration\Field;
 use WEBcoast\Migrator\Migration\FieldType;
+use WEBcoast\Migrator\Utility\ArrayUtility;
 
 class FileFieldNormalizer extends AbstractFieldConfigurationNormalizer
 {
-
-    public function normalize(FieldInterface|Fal|Inline $field, array $normalizedFieldConfiguration, array $config): array
+    public function normalize(FieldInterface|Fal|Inline $field, Field $normalizedField, array $config): void
     {
-        $normalizedFieldConfiguration['type'] = FieldType::FILE;
-        $normalizedFieldConfiguration['config'] = [
+        $normalizedField->setType(FieldType::FILE);
+        $normalizedConfiguration = [
             'allowed' => $field->getOverrideChildTca()['columns']['uid_local']['config']['appearance']['elementBrowserAllowed'] ?? null,
             'appearance' => [
                 'collapseAll' => $field->getCollapseAll(),
@@ -41,15 +42,18 @@ class FileFieldNormalizer extends AbstractFieldConfigurationNormalizer
         ];
         // Unset allowed from overrideChildTca as it's already set on the field configuration
         unset(
-            $normalizedFieldConfiguration['config']['overrideChildTca']['columns']['uid_local']['config']['appearance']['elementBrowserAllowed'],
-            $normalizedFieldConfiguration['config']['overrideChildTca']['columns']['uid_local']['config']['appearance']['elementBrowserType']
+            $normalizedConfiguration['overrideChildTca']['columns']['uid_local']['config']['appearance']['elementBrowserAllowed'],
+            $normalizedConfiguration['overrideChildTca']['columns']['uid_local']['config']['appearance']['elementBrowserType']
         );
         // Unset headerThumbnail if it's the default value to avoid unnecessary configuration
-        if ($normalizedFieldConfiguration['config']['appearance']['headerThumbnail'] === ['field' => 'uid_local', 'width' => '64', 'height' => '64']) {
-            unset($normalizedFieldConfiguration['config']['appearance']['headerThumbnail']);
+        if ($normalizedConfiguration['appearance']['headerThumbnail'] === ['field' => 'uid_local', 'width' => '64', 'height' => '64']) {
+            unset($normalizedConfiguration['appearance']['headerThumbnail']);
         }
-
-        return $normalizedFieldConfiguration;
+        $normalizedField->setConfiguration(
+            ArrayUtility::removeEmptyValuesFromArray(
+                $normalizedConfiguration
+            )
+        );
     }
 
     public function supports(FieldInterface $field, array $config): bool
